@@ -4,6 +4,27 @@ output: html_document
 date: "2025-11-07"
 ---
 
+```{r echo=TRUE}
+# libraries
+# library()
+
+if(!file.exists("semanvamd_env.R")) stop("semanvamd_env.R not found")
+
+source("semanvamd_env.R")
+
+# Create postgres connection
+con <- DBI::dbConnect(RPostgres::Postgres(), dbname = db_name, host = db_host, port = db_port, user = db_user, password = db_password,   options=paste0("-c search_path=", db_schema))
+
+# List tables in schema
+tables <- DBI::dbListTables(con, schema = db_schema)
+
+# Database meta data and c
+dbMeta <- DBI::dbGetQuery(con, "SELECT * FROM database_meta_data") |> 
+  filter(cdm_source_abbreviation == cdmSourceAbbrev)
+
+databaseId <- dbMeta$database_id
+```
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
