@@ -1,0 +1,285 @@
+---
+title: "Semanvamd - CM - for Cindy et al."
+author: "Diep Tran"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+## Import libraries and setting up connection 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(DT)
+library(DBI)
+library(glue)
+library(kableExtra)
+library(RPostgres)
+library(dplyr)
+library(purrr)
+library(stringr)
+library(tidyr)
+library(xlsx)
+
+
+if(!file.exists("semanvamd_env.R")) stop("semanvamd_env.R not found")
+
+source("semanvamd_env.R")
+
+# Create postgres connection
+con <- DBI::dbConnect(RPostgres::Postgres(), dbname = db_name, host = db_host, port = db_port, user = db_user, password = db_password,   options=paste0("-c search_path=", db_schema))
+
+# List tables in schema
+tables <- DBI::dbListTables(con, schema = db_schema)
+
+# Database meta data and c
+dbMeta <- DBI::dbGetQuery(con, "SELECT * FROM database_meta_data") |> 
+  filter(cdm_source_abbreviation == cdmSourceAbbrev)
+```
+
+## Databases Available
+
+```{r databases, echo=FALSE}
+databases <- DBI::dbGetQuery(con, "SELECT * FROM database_meta_data") |> 
+  select(cdm_source_name, cdm_source_abbreviation, cdm_holder, database_id) 
+
+databases |> kable()
+```
+
+## Database nicknames
+
+We will map long database names to short ones for publication. Please confirm these are right.
+
+```{r database_nicknames, echo=FALSE}
+
+dbMap <- list(
+  "CUIMC" = "CUIMC",
+  "JHME" = "JHME",
+  "Merative CCAE" = "CCAE",
+  "Merative MDCD" = "MDCD",
+  "Merative MDCR" = "MDCR",
+  "OHSU" = "OHSU",
+  "Optum EHR" = "Optum® EHR",
+  "OPTUM Extended SES" = "Clinformatics®",
+  "STARR" = "STARR",
+  "USC" = "USC",
+  "VA-OMOP" = "VA",
+  "WashU" = "WU"
+)
+
+# Make df. key = col 1, val = col 2. remove row names
+dbMapDf <- data.frame(
+  long = names(dbMap),
+  short = unlist(dbMap)
+)
+
+dbMapDf |> kable(row.names = FALSE)
+
+# Merge in short name
+databases <- databases |> 
+  left_join(dbMapDf, by = c("cdm_source_abbreviation" = "long")) |> 
+  rename(database_short_name = short)
+
+
+dbMapOrder <- list(
+  "CUIMC" = 3,
+  "JHME" = 4,
+  "Merative CCAE" = 1,
+  "Merative MDCD" = 5,
+  "Merative MDCR" = 6,
+  "OHSU" = 7,
+  "Optum EHR" = 8,
+  "OPTUM Extended SES" = 2,
+  "STARR" = 9,
+  "USC" = 10,
+  "VA-OMOP" = 11,
+  "WashU" = 12
+)
+
+dbOrderDf <- data.frame(
+  long = names(dbMapOrder),
+  order = unlist(dbMapOrder)
+)
+
+databases <- databases |> 
+  left_join(dbOrderDf, by = c("cdm_source_abbreviation" = "long")) |> 
+  arrange(order)
+```
+
+## Diagnostics Stats
+
+For each database, for both sensitive and specific PDR phenotypes, for each target/comparator pair, we need:
+
+-   Maximum standardized mean difference
+-   Equipoise
+-   MDDR
+-   Attrition fraction
+-   EASE
+
+These are stored in `cm_diagnostic_summary`, so lets first pull all that data out. We'll then manipulate it into the results we need.
+
+```{r diagnostics_data, echo=FALSE}
+
+allDiagnosticsSql <- "
+  SELECT * FROM cm_diagnostics_summary;
+"
+
+allDiagnostics <- DBI::dbGetQuery(con, allDiagnosticsSql)
+```
+
+## Treatment vs. Comparator pairs
+
+```{r tc-pairs, echo=FALSE}
+
+cohortIds <- c(
+   "Semaglutide" = 17793,
+   "Dulaglutide" = 17796,
+   "Exenatide" = 17797,
+   "Empagliflozin" = 17798,
+   "Sitagliptin" = 17799,
+   "Glipizide" = 17801
+)
+
+cohortCombinations <- expand.grid(cohortIds, cohortIds) |> as.data.frame()
+names(cohortCombinations) <- c("target_cohort_id", "comparator_cohort_id")
+
+cohortCombinations$target_name <- cohortCombinations$target_cohort_id |> map_chr(~names(cohortIds)[.x]) |> names()
+cohortCombinations$comparator_name <- cohortCombinations$comparator_cohort_id |> map_chr(~names(cohortIds)[.x]) |> names()
+
+# Filter self-comparisons and reorder
+cohortCombinations <- cohortCombinations |> 
+  filter(target_cohort_id != comparator_cohort_id) |>
+  select(target_cohort_id, target_name, comparator_cohort_id, comparator_name) |> 
+  mutate(comparison_name = glue("{target_name} vs. {comparator_name}")) |> 
+  arrange(target_cohort_id)
+
+cohortCombinations |> kable(row.names = TRUE)
+
+# Get only those in cmTcList.csv
+cohortCombinationsFromCmTc <- readr::read_csv("https://raw.githubusercontent.com/ohdsi-studies/SemaglutideNaion/refs/heads/master/inst/cmTcList.csv") 
+
+# Only get those that are in cmTcList.csv
+cohortCombinations <- cohortCombinations |> 
+  filter(target_cohort_id %in% cohortCombinationsFromCmTc$target_cohort_id & comparator_cohort_id %in% cohortCombinationsFromCmTc$comparator_cohort_id)
+
+cohortCombinations |> kable(row.names = TRUE)
+
+```
+
+```{r diagnostics-helpers, echo=FALSE}
+getTCDiagnostics <- function(targetId, comparatorId, outcomeId) {
+  allDiagnostics |> 
+    filter(
+      target_id == targetId,
+      comparator_id == comparatorId,
+      outcome_id == outcomeId
+    ) |> 
+    mutate(
+      database_id = as.character(database_id),
+      target_id = as.double(target_id),
+      comparator_id = as.double(comparator_id)
+    ) |> 
+    inner_join(databases, by = "database_id") |>
+    inner_join(cohortCombinations, by = c("target_id" = "target_cohort_id", "comparator_id" = "comparator_cohort_id")) |> 
+    mutate(
+      max_sdm_result = paste0(round(max_sdm, 2), " (", stringr::str_to_lower(balance_diagnostic), ")"),
+      shared_max_sdm_result = paste0(round(shared_max_sdm, 2), " (", stringr::str_to_lower(shared_balance_diagnostic), ")"),
+      equipoise_result = paste0(round(equipoise, 2), " (", stringr::str_to_lower(equipoise_diagnostic), ")"),
+      mdrr_result = paste0(round(mdrr, 2), " (", stringr::str_to_lower(mdrr_diagnostic), ")"),
+      attrition_fraction_result = paste0(round(attrition_fraction, 2), " (", stringr::str_to_lower(attrition_diagnostic), ")"),
+      ease_result = paste0(round(ease, 2), " (", stringr::str_to_lower(ease_diagnostic), ")"),
+      all_pass = if_else(shared_balance_diagnostic == "PASS" & equipoise_diagnostic == "PASS" & mdrr_diagnostic == "PASS" & ease_diagnostic == "PASS", "Yes", "No"),
+      all_pass_or_not_evaluated = if_else(
+        (shared_balance_diagnostic == "PASS" | shared_balance_diagnostic == "NOT_EVALUATED") &
+        (equipoise_diagnostic == "PASS" | equipoise_diagnostic == "NOT_EVALUATED") &
+        (mdrr_diagnostic == "PASS" | mdrr_diagnostic == "NOT_EVALUATED") &
+        (ease_diagnostic == "PASS" | ease_diagnostic == "NOT_EVALUATED"), "Yes", "No"
+      ),
+      shared_sdm_pass_sdm_fail = if_else(shared_balance_diagnostic == "PASS" & balance_diagnostic == "FAIL", "Yes", "No"),
+      shared_sdm_fail_sdm_pass = if_else(shared_balance_diagnostic == "FAIL" & balance_diagnostic == "PASS", "Yes", "No"),
+    ) |>
+    select(
+      comparison_name, database_short_name, max_sdm_result, shared_max_sdm_result, equipoise_result, mdrr_result, ease_result, all_pass, all_pass_or_not_evaluated, shared_sdm_pass_sdm_fail, shared_sdm_fail_sdm_pass, unblind
+    ) |> 
+    arrange(comparison_name, database_short_name)
+}
+
+
+aggregateResults <- function(outcomeId) {
+  results <- data.frame()
+  
+  for(i in 1:nrow(cohortCombinations)) {
+    row <- cohortCombinations[i,]
+    targetId <- row$target_cohort_id
+    comparatorId <- row$comparator_cohort_id
+    
+    results <- bind_rows(results, getTCDiagnostics(targetId, comparatorId, outcomeId))
+  }
+  
+  results
+}
+
+processForSaving <- function(df) {
+  df |> 
+    select(comparison_name, database_short_name, shared_max_sdm_result, equipoise_result, mdrr_result, ease_result, all_pass) |> 
+    mutate(
+      comparison_name = if_else(duplicated(comparison_name), "", comparison_name)
+    )
+}
+
+outcomeIds <- c(
+  17706, # Proliferative diabetic retinopathy	
+  17788	 # Treatment-requiring Diabetic Retinopathy or Macular Edema including vitrectomy
+)
+```
+
+## Proliferative diabetic retinopathy
+
+```{r sensitive_pdr, echo=FALSE}
+
+results <- aggregateResults(17706)
+
+results |> DT::datatable(options = list(pageLength = 20))
+
+totalPass <- results |> filter(all_pass == "Yes") |> nrow()
+totalFail <- results |> filter(all_pass == "No") |> nrow()
+total <- nrow(results)
+
+summary <- data.frame(
+  total = total,
+  total_pass = totalPass,
+  total_fail = totalFail,
+  pass_rate = round(totalPass / total, 2)
+)
+
+summary |> kable(row.names = FALSE)
+
+xlsx::write.xlsx(processForSaving(results), "study-diagnostics_cm_pdr.xlsx")
+
+```
+
+## Treatment-requiring Diabetic Retinopathy or Macular Edema including vitrectomy
+
+```{r specific_pdr, echo=FALSE}
+
+results <- aggregateResults(17788)
+results |> DT::datatable(options = list(pageLength = 20))
+
+totalPass <- results |> filter(all_pass == "Yes") |> nrow()
+totalFail <- results |> filter(all_pass == "No") |> nrow()
+total <- nrow(results)
+
+summary <- data.frame(
+  total = total,
+  total_pass = totalPass,
+  total_fail = totalFail,
+  pass_rate = round(totalPass / total, 2)
+)
+
+summary |> kable(row.names = FALSE)
+
+xlsx::write.xlsx(processForSaving(results), "study-diagnostics_cm_tdrmev.xlsx")
+
+```
