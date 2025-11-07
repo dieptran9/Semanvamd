@@ -22,7 +22,7 @@ library(purrr)
 library(stringr)
 library(tidyr)
 library(xlsx)
-
+library(readr)
 
 if(!file.exists("semanvamd_env.R")) stop("semanvamd_env.R not found")
 
@@ -132,14 +132,15 @@ allDiagnostics <- DBI::dbGetQuery(con, allDiagnosticsSql)
 ## Treatment vs. Comparator pairs
 
 ```{r tc-pairs, echo=FALSE}
-
+# Need a reference why pick the drug exposure
+   
 cohortIds <- c(
-   "Semaglutide" = 17793,
-   "Dulaglutide" = 17796,
-   "Exenatide" = 17797,
-   "Empagliflozin" = 17798,
-   "Sitagliptin" = 17799,
-   "Glipizide" = 17801
+   "Semaglutide" = 101,
+   "Dulaglutide" = 102,
+   "Exenatide" = 103,
+   "Empagliflozin" = 104,
+   "Sitagliptin" = 105,
+   "Glipizide" = 106
 )
 
 cohortCombinations <- expand.grid(cohortIds, cohortIds) |> as.data.frame()
@@ -158,7 +159,8 @@ cohortCombinations <- cohortCombinations |>
 cohortCombinations |> kable(row.names = TRUE)
 
 # Get only those in cmTcList.csv
-cohortCombinationsFromCmTc <- readr::read_csv("https://raw.githubusercontent.com/ohdsi-studies/SemaglutideNaion/refs/heads/master/inst/cmTcList.csv") 
+cohortCombinationsFromCmTc <- readr::read_csv("https://raw.githubusercontent.com/ohdsi-studies/SemaglutideNvamd/main/inst/cmTcList.csv") 
+#https://raw.githubusercontent.com/ohdsi-studies/SemaglutideNaion/refs/heads/master/inst/cmTcList.csv
 
 # Only get those that are in cmTcList.csv
 cohortCombinations <- cohortCombinations |> 
