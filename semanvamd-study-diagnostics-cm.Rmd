@@ -131,16 +131,22 @@ allDiagnostics <- DBI::dbGetQuery(con, allDiagnosticsSql)
 
 ## Treatment vs. Comparator pairs
 
+These cohorts are not defined in the study package, but exist in the database. Do we need to document how these are run somewhere?
+
+We are going to select:
+
+Prior T2DM, Prior metformin
+
+Drug exposure: Semaglutide (GLP-1 RA), Dulaglutide (GLP-1 RA), Exenatide (GLP-1 RA), Empagliflozin (SGLT2 inhibitor), Sitagliptin (DPP4 inhibitor), Glipizide (sulfonylurea), Drug used as 2nd-line treatment
+
 ```{r tc-pairs, echo=FALSE}
-# Need a reference why pick the drug exposure
-   
 cohortIds <- c(
-   "Semaglutide" = 101,
-   "Dulaglutide" = 102,
-   "Exenatide" = 103,
-   "Empagliflozin" = 104,
-   "Sitagliptin" = 105,
-   "Glipizide" = 106
+   "Semaglutide" = 201,
+   "Dulaglutide" = 211,
+   "Exenatide" = 212,
+   "Empagliflozin" = 213,
+   "Sitagliptin" = 214,
+   "Glipizide" = 215
 )
 
 cohortCombinations <- expand.grid(cohortIds, cohortIds) |> as.data.frame()
@@ -164,7 +170,8 @@ cohortCombinationsFromCmTc <- readr::read_csv("https://raw.githubusercontent.com
 
 # Only get those that are in cmTcList.csv
 cohortCombinations <- cohortCombinations |> 
-  filter(target_cohort_id %in% cohortCombinationsFromCmTc$target_cohort_id & comparator_cohort_id %in% cohortCombinationsFromCmTc$comparator_cohort_id)
+  filter(target_cohort_id %in% cohortCombinationsFromCmTc$target_cohort_id & 
+           comparator_cohort_id %in% cohortCombinationsFromCmTc$comparator_cohort_id)
 
 cohortCombinations |> kable(row.names = TRUE)
 
@@ -232,16 +239,16 @@ processForSaving <- function(df) {
 }
 
 outcomeIds <- c(
-  17706, # Proliferative diabetic retinopathy	
-  17788	 # Treatment-requiring Diabetic Retinopathy or Macular Edema including vitrectomy
+  1, # Specific NVAMD	
+  2	 # Sensitive NVAMD
 )
 ```
 
-## Proliferative diabetic retinopathy
+## Specific NVAMD
 
 ```{r sensitive_pdr, echo=FALSE}
 
-results <- aggregateResults(17706)
+results <- aggregateResults(1)
 
 results |> DT::datatable(options = list(pageLength = 20))
 
@@ -258,15 +265,15 @@ summary <- data.frame(
 
 summary |> kable(row.names = FALSE)
 
-xlsx::write.xlsx(processForSaving(results), "study-diagnostics_cm_pdr.xlsx")
+xlsx::write.xlsx(processForSaving(results), "study-diagnostics_cm_specific_NVAMD.xlsx")
 
 ```
 
-## Treatment-requiring Diabetic Retinopathy or Macular Edema including vitrectomy
+## Sensitive NVAMD
 
 ```{r specific_pdr, echo=FALSE}
 
-results <- aggregateResults(17788)
+results <- aggregateResults(2)
 results |> DT::datatable(options = list(pageLength = 20))
 
 totalPass <- results |> filter(all_pass == "Yes") |> nrow()
@@ -282,6 +289,6 @@ summary <- data.frame(
 
 summary |> kable(row.names = FALSE)
 
-xlsx::write.xlsx(processForSaving(results), "study-diagnostics_cm_tdrmev.xlsx")
+xlsx::write.xlsx(processForSaving(results), "study-diagnostics_cm_sensitive_nvamd.xlsx")
 
 ```

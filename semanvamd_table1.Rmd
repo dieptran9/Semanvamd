@@ -1,13 +1,19 @@
 ---
-title: "semanvamd_table1"
+title: "Semanavmd Results Characterization By Site"
+author: "Diep Tran"
 output: html_document
 date: "2025-11-07"
 ---
 
-```{r echo=TRUE}
-# libraries
-# library()
+## Import libraries and connection setting up
 
+```{r Import libraries, echo=TRUE}
+# libraries
+library(dplyr)
+library(knitr)
+```
+
+```{r Connection setup, echo=TRUE}
 if(!file.exists("semanvamd_env.R")) stop("semanvamd_env.R not found")
 
 source("semanvamd_env.R")
@@ -29,11 +35,20 @@ databaseId <- dbMeta$database_id
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
+## Processing data
 
 This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
 
 When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+### Data available
+
+```{r databases, echo=FALSE}
+databases <- DBI::dbGetQuery(con, "SELECT * FROM database_meta_data") |> 
+  select(cdm_source_name, cdm_source_abbreviation, cdm_holder, database_id) 
+
+databases |> kable()
+```
 
 ```{r cars}
 summary(cars)

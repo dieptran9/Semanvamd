@@ -6,5 +6,5 @@ db_user <- 'semanaion_ro'
 db_password <- 'NRD9GU4QW93'
 db_port <- 5432
 
-cdmSourceAbbrev <- 'JHME'
-#cdmSourceAbbrev <- 'OPTUM Extended SES'
+# cdmSourceAbbrev <- 'JHME'
+cdmSourceAbbrev <- 'OPTUM Extended SES'
