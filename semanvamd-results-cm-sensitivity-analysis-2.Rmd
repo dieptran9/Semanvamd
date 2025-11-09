@@ -1,0 +1,515 @@
+---
+title: "Semaglutide NVAMD Cohort Method Results - Sensitivity Analysis #2"
+author: "Diep Tran"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(DT)
+library(DBI)
+library(glue)
+library(kableExtra)
+library(RPostgres)
+library(dplyr)
+library(purrr)
+library(stringr)
+library(tidyr)
+library(xlsx)
+
+
+if(!file.exists("semanvamd_env.R")) stop("semanvamd_env.R not found")
+
+source("semanvamd_env.R")
+
+
+# Create postgres connection
+con <- DBI::dbConnect(RPostgres::Postgres(), dbname = db_name, host = db_host, port = db_port, user = db_user, password = db_password,   options=paste0("-c search_path=", db_schema))
+
+# List tables in schema
+tables <- DBI::dbListTables(con, schema = db_schema)
+
+# Database meta data and c
+dbMeta <- DBI::dbGetQuery(con, "SELECT * FROM database_meta_data") |> 
+  filter(cdm_source_abbreviation == cdmSourceAbbrev)
+
+
+```
+
+This will produce data and graphics for the Cohort Method estimation. SCSS will be put together separately.
+
+## Databases Available
+
+```{r databases, echo=FALSE}
+databases <- DBI::dbGetQuery(con, "SELECT * FROM database_meta_data") |> 
+  select(cdm_source_name, cdm_source_abbreviation, cdm_holder, database_id) 
+
+databases |> kable()
+```
+
+## Database nicknames
+
+We will map long database names to short ones for publication. Please confirm these are right.
+
+```{r database_nicknames, echo=FALSE}
+
+dbMap <- list(
+  "CUIMC" = "CUIMC",
+  "JHME" = "JHME",
+  "Merative CCAE" = "CCAE",
+  "Merative MDCD" = "MDCD",
+  "Merative MDCR" = "MDCR",
+  "OHSU" = "OHSU",
+  "Optum EHR" = "Optum® EHR",
+  "OPTUM Extended SES" = "Clinformatics®",
+  "STARR" = "STARR",
+  "USC" = "USC",
+  "VA-OMOP" = "VA",
+  "WashU" = "WU"
+)
+
+
+# Make df. key = col 1, val = col 2. remove row names
+dbMapDf <- data.frame(
+  long = names(dbMap),
+  short = unlist(dbMap)
+)
+
+dbMapDf |> kable(row.names = FALSE)
+
+# Merge in short name
+databases <- databases |> 
+  left_join(dbMapDf, by = c("cdm_source_abbreviation" = "long")) |> 
+  rename(database_short_name = short)
+
+dbMapOrder <- list(
+  "CUIMC" = 3,
+  "JHME" = 4,
+  "Merative CCAE" = 1,
+  "Merative MDCD" = 5,
+  "Merative MDCR" = 6,
+  "OHSU" = 7,
+  "Optum EHR" = 8,
+  "OPTUM Extended SES" = 2,
+  "STARR" = 9,
+  "USC" = 10,
+  "VA-OMOP" = 11,
+  "WashU" = 12
+)
+
+
+dbOrderDf <- data.frame(
+  long = names(dbMapOrder),
+  order = unlist(dbMapOrder)
+)
+
+databases <- databases |> 
+  left_join(dbOrderDf, by = c("cdm_source_abbreviation" = "long")) |> 
+  arrange(order)
+
+```
+
+## Outcomes
+
+Outcomes:
+
+-   Specific NVAMD (Cohort ID: `1`)
+-   Sensitive NVAMD(Cohort ID: `2`)
+
+## Treatment/Comparator Exposure Pairs
+
+For the first sensitivity analysis, we will compare the following treatments and comparators. These are time-limited.
+
+Exposure Cohorts:
+
+-   `401`: New user of semaglutide as 2nd line prior T2DM and metformin Dec2017-Jan2020 vs.
+-   `411`: New user of empagliflozin as 2nd line prior T2DM and metformin Dec2017-Jan2020
+
+--
+
+-   `402`: New user of semaglutide as 2nd line prior T2DM and metformin Feb2020-June2021 vs.
+-   `412`: New user of empagliflozin as 2nd line prior T2DM and metformin Feb2020-June2021
+
+--
+
+-   `403`: New user of semaglutide as 2nd line prior T2DM and metformin July2021-Dec2024 vs.
+-   `413`: New user of empagliflozin as 2nd line prior T2DM and metformin July2021-Dec2024
+
+We will grab these from the `cmTcList.csv` file
+
+```{r tcs, echo=FALSE}
+
+outcomeIds <- c(
+  1, # Specific NVAMD
+  2  # Sensitive NVAMD
+)
+
+cohortIds <- c(
+    "Semaglutide 2nd-line tx w/ prior T2DM Dec2017-Jan2020" = 401,
+    "Empagliflozin 2nd-line tx w/ prior T2DM Dec2017-Jan2020" = 411,
+    "Semaglutide 2nd-line tx w/ prior T2DM Feb2020-Jun2021" = 402,
+    "Empagliflozin 2nd-line tx w/ prior T2DM Feb2020-Jun2021" = 412,
+    "Semaglutide 2nd-line tx w/ prior T2DM Jul2021-Dec2024" = 403,
+    "Empagliflozin 2nd-line tx w/ prior T2DM Jul2021-Dec2024" = 413
+)
+
+cohortCombinations <- readr::read_csv("https://raw.githubusercontent.com/ohdsi-studies/SemaglutideNvamd/main/inst/cmTcList.csv") |> 
+  filter(target_cohort_id %in% cohortIds, comparator_cohort_id %in% cohortIds) |> 
+  rename(
+    target_name = target_cohort_name,
+    comparator_name = comparator_cohort_name
+  ) |> 
+  select(target_cohort_id, target_name, comparator_cohort_id, comparator_name) |> 
+  mutate(comparison_name = glue("{target_name} vs. {comparator_name}")) 
+
+cohortCombinations |> kable(row.names = TRUE)
+```
+
+## Passed Diagnostics
+
+The following diagnostics exist for every T/C pair by outcome and datbaase:
+
+-   Maximum standardized mean difference (unshared and shared, see: <https://ohdsi.github.io/CohortMethod/articles/MultipleAnalyses.html>)
+-   Equipoise
+-   MDDR
+-   EASE
+
+These are stored in `cm_diagnostic_summary`. We will visualize only those that pass all diagnostics. To determine whether all pass, we rely upon the `unblind` flag.
+
+```{r diagnostics_data, echo=FALSE}
+
+allDiagnosticsSql <- "
+  SELECT * FROM cm_diagnostics_summary;
+"
+
+allDiagnostics <- DBI::dbGetQuery(con, allDiagnosticsSql)
+```
+
+The following T/C pairs pass all results according to `unblind`.
+
+```{r passed-diagnostics, echo=FALSE}
+
+allPassedData <- allDiagnostics |> 
+  mutate(
+    database_id = as.character(database_id),
+    target_id = as.double(target_id),
+    comparator_id = as.double(comparator_id)
+  ) |> 
+  mutate(
+    all_pass = balance_diagnostic == "PASS" & shared_balance_diagnostic == "PASS" & equipoise_diagnostic == "PASS" & mdrr_diagnostic == "PASS" & ease_diagnostic == "PASS"
+  ) |> 
+ filter(
+   unblind == 1
+ )
+
+summarizedDiagnosticData <- allPassedData |> 
+  filter(
+    target_id %in% cohortIds & comparator_id %in% cohortIds,
+    outcome_id %in% c(1, 2)
+  ) |> 
+  mutate(
+    database_id = as.character(database_id),
+    target_id = as.double(target_id),
+    comparator_id = as.double(comparator_id),
+    outcome_name = case_when(
+      outcome_id == 1 ~ "Specific NVAMD",
+      outcome_id == 2 ~ "Sensitive NVAMD"
+    )
+  ) |> 
+  inner_join(cohortCombinations, by = c("target_id" = "target_cohort_id", "comparator_id" = "comparator_cohort_id")) |> 
+  inner_join(databases, by = "database_id")
+
+
+summarizedDiagnosticDataSummary <- summarizedDiagnosticData |>
+  select(
+    outcome_name, database_short_name, comparison_name, unblind
+  ) |> 
+  arrange(outcome_name, database_short_name, comparison_name)
+
+
+summarizedDiagnosticDataSummary |> kable()
+```
+
+## Results
+
+We will grab only data for the passed diagnostics. Reported risk ratios, CI bounds, and p-values are from **calibrated results**.
+
+```{r results_data, echo=FALSE}
+
+resultsSql <- "
+  SELECT * FROM cm_result;
+"
+
+# Only include passed diagnostics T/C Pairs
+matchedResults <- DBI::dbGetQuery(con, resultsSql) |> 
+  mutate(
+    database_id = as.character(database_id),
+    target_id = as.double(target_id),
+    comparator_id = as.double(comparator_id)
+  ) |> 
+  inner_join(summarizedDiagnosticData |> select(database_id, outcome_id, target_id, comparator_id), by = c("database_id", "outcome_id", "target_id", "comparator_id"))
+
+
+rrVsCalibratedRr <- matchedResults |> 
+  # filter(
+  #   target_outcomes != 0 & comparator_outcomes != 0
+  # ) |> 
+  select(database_id, outcome_id, target_id, comparator_id,  rr, calibrated_rr, p, calibrated_p) |> 
+  mutate(
+    rr_cal_diff = rr - calibrated_rr,
+    abs_rr_cal_diff = abs(rr_cal_diff),
+      outcome_name = case_when(
+      outcome_id == 1 ~ "Specific NVAMD",
+      outcome_id == 2 ~ "Sensitive NVAMD"
+    )
+  ) |> 
+  inner_join(cohortCombinations |> select(target_cohort_id, comparator_cohort_id, comparison_name), by = c("target_id" = "target_cohort_id", "comparator_id" = "comparator_cohort_id")) |> 
+  inner_join(databases |> select(database_id, database_short_name), by = "database_id") |>
+  select(database_short_name, outcome_name, comparison_name, rr, p, calibrated_rr, calibrated_p, rr_cal_diff, abs_rr_cal_diff)
+  
+  
+presentationResults <-  matchedResults |> 
+  mutate(
+    database_id = as.character(database_id),
+    target_id = as.double(target_id),
+    comparator_id = as.double(comparator_id),
+    outcome_name = case_when(
+      outcome_id == 1 ~ "Specific NVAMD",
+      outcome_id == 2 ~ "Sensitive NVAMD"
+    )
+  ) |> 
+    inner_join(cohortCombinations, by = c("target_id" = "target_cohort_id", "comparator_id" = "comparator_cohort_id")) |> 
+    inner_join(databases, by = "database_id") |> 
+  select(
+    database_id, database_short_name, outcome_id, outcome_name, target_id, target_name, comparator_id, comparator_name, comparison_name, calibrated_rr, calibrated_ci_95_lb, calibrated_ci_95_ub, calibrated_p, target_subjects, comparator_subjects, target_days, comparator_days, target_outcomes, comparator_outcomes
+  )
+
+
+formatPresentationResults <- function(df) {
+  df |> 
+  select(
+    database_short_name, outcome_name,comparison_name, target_subjects, target_days, comparator_days, target_outcomes, comparator_outcomes, calibrated_rr, calibrated_ci_95_lb, calibrated_ci_95_ub, calibrated_p
+  ) |> 
+  rename(
+    "database_name" = database_short_name,
+    "n" = target_subjects,
+    "hr" = calibrated_rr,
+    "hr_lb" = calibrated_ci_95_lb,
+    "hr_ub" = calibrated_ci_95_ub,
+    "p" = calibrated_p
+  ) |> 
+  mutate(
+    hr = round(hr, 3),
+    hr_lb = round(hr_lb, 3),
+    hr_ub = round(hr_ub, 3),
+    p = round(p, 3)
+  ) |> 
+  arrange(database_name, outcome_name, comparison_name, hr)
+}
+
+```
+
+## Risk ratio vs calibrated risk ratio
+
+```{r rr-vs-calibrated-rr, echo=FALSE}
+
+rrVsCalibratedRr |>
+  arrange(-abs_rr_cal_diff) |>
+  kable()
+
+```
+
+### Correlation of RR vs Calibrated RR
+
+```{r rr-vs-calibrated-rr-correlation, echo=FALSE}
+print(cor(rrVsCalibratedRr$rr, rrVsCalibratedRr$calibrated_rr))
+```
+
+### Summary of differences between RR and Calibrated RR
+
+```{r rr-vs-calibrated-rr-diff, echo=FALSE}
+
+summary(rrVsCalibratedRr$rr_cal_diff) 
+
+```
+
+## Results with passed diagnostics but no either 0 Target or Comparator outcomes
+
+```{r display-results, echo=FALSE}
+
+presentationResultsHasNoOutcomes <- presentationResults |> 
+  filter(
+    is.na(target_outcomes) | is.na(comparator_outcomes) | target_outcomes == 0 | comparator_outcomes == 0
+  )
+
+presentationResultsHasNoOutcomes |> DT::datatable(
+  options = list(
+    pageLength = 5,
+    scrollX = TRUE
+  )
+)
+
+
+```
+
+## Results for T/C pairs with passed diagnostics and at least 1 Target and Comparator outcomes
+
+```{r display-results-again, echo=FALSE}
+
+presentationResultsHasOutcomes <- presentationResults |> 
+  filter(
+    target_outcomes != 0 & comparator_outcomes != 0
+  )
+
+presentationResultsHasOutcomes |> DT::datatable(
+  options = list(
+    pageLength = 20,
+    scrollX = TRUE
+  )
+)
+  
+```
+
+## Evidence Synthesis Results
+
+To get the Bayesian random-effects synthesis, we need to pull results outs from the `es_cm_result` table for the relevant outcomes. We only want results for those that passed diagnostics, which are saved in the `es_cm_diagnostics_summary` table.
+
+We again rely upon `unblind` to decide whether a result should be presented.
+
+```{r display-es-results, echo=FALSE}
+
+esDiagnosticSummarySql <- "
+  SELECT * from es_cm_diagnostics_summary
+"
+
+allEsDiagnosticResults <- dbGetQuery(con, esDiagnosticSummarySql) |> 
+  filter(outcome_id %in% outcomeIds) |> 
+  filter(target_id %in% cohortIds & comparator_id %in% cohortIds) |>
+  mutate(
+      mdrr_result = paste0(round(mdrr, 2), " (", stringr::str_to_lower(mdrr_diagnostic), ")"),
+      ease_result = paste0(round(ease, 2), " (", stringr::str_to_lower(ease_diagnostic), ")"),
+      tau_result = paste0(round(tau, 2), " (", stringr::str_to_lower(tau_diagnostic), ")"),
+      all_pass = mdrr_diagnostic == "PASS" & ease_diagnostic == "PASS" & tau_diagnostic == "PASS"
+    ) |> 
+    inner_join(cohortCombinations, by = c("target_id" = "target_cohort_id", "comparator_id" = "comparator_cohort_id")) |> 
+    mutate(
+      outcome_name = case_when(
+        outcome_id == 1 ~ "Specific NVAMD",
+        outcome_id == 2 ~ "Sensitive NVAMD"
+      )
+    )
+
+
+allEsDiagnosticResultsPresentation <- allEsDiagnosticResults |>
+    select(outcome_name, comparison_name, mdrr_result, ease_result, tau_result, unblind) |> 
+  arrange(outcome_name, comparison_name)
+
+allEsDiagnosticResultsPresentation |> kable()
+
+diganosticSummary <- data.frame(
+  allEsDiagnosticResults |>
+    group_by(outcome_name) |>
+    summarise(
+      n = n(),
+      n_pass = sum(all_pass),
+      pass_rate = n_pass / n
+    )
+)
+
+diganosticSummary |> kable()
+
+```
+
+We'll grab results only for passed diagnostics relying upon `unblind.`
+
+```{r es-results, echo=FALSE}
+
+allEsResultsSql = "
+  SELECT * from es_cm_result
+"
+
+esResults <- dbGetQuery(con, allEsResultsSql) |> 
+  filter(outcome_id %in% outcomeIds) |> 
+  filter(target_id %in% cohortIds & comparator_id %in% cohortIds)
+
+passedEsResults <- allEsDiagnosticResults |> 
+  filter(unblind == 1) |>
+  inner_join(esResults, by = c("outcome_id", "target_id", "comparator_id")) |> 
+  select(
+    outcome_id, outcome_name, target_id, target_name, comparator_id, comparator_name, comparison_name, target_subjects, target_days, comparator_days, target_outcomes, comparator_outcomes, calibrated_rr, calibrated_ci_95_lb, calibrated_ci_95_ub, calibrated_p
+  ) 
+
+```
+
+## T/C Results, single table, pared down
+
+Please note these are *calibrated* values.
+
+```{r display-results-compact, echo=FALSE}
+
+
+mainResults <- presentationResultsHasOutcomes |> 
+  select(
+    database_id, database_short_name, outcome_id, outcome_name, target_id, target_name, comparator_id, comparator_name, comparison_name, target_subjects, target_days, comparator_days, target_outcomes, comparator_outcomes, calibrated_rr, calibrated_ci_95_lb, calibrated_ci_95_ub, calibrated_p
+  ) |> 
+  mutate(
+    target_outcomes = as.character(target_outcomes),
+    comparator_outcomes = as.character(comparator_outcomes),
+    target_outcomes = if_else(target_outcomes == "-5", "<5", target_outcomes),
+    comparator_outcomes = if_else(comparator_outcomes == "-5", "<5", comparator_outcomes)
+  ) |> 
+  rename(
+    database_name = database_short_name,
+    target_cohort_id = target_id,
+    comparator_cohort_id = comparator_id,
+    group_n = target_subjects,
+    hr = calibrated_rr,
+    hr_lb = calibrated_ci_95_lb,
+    hr_ub = calibrated_ci_95_ub,
+    p = calibrated_p
+  )
+
+esResults <-  passedEsResults |>
+      mutate(
+      database_id = "1",
+      database_name = "Bayesian Synthesis",
+    )  |> 
+  rename(
+    target_cohort_id = target_id,
+    comparator_cohort_id = comparator_id,
+    group_n = target_subjects,
+    hr = calibrated_rr,
+    hr_lb = calibrated_ci_95_lb,
+    hr_ub = calibrated_ci_95_ub,
+    p = calibrated_p
+  ) |>
+   select(database_id, database_name, outcome_id, outcome_name, target_cohort_id, target_name, comparator_cohort_id, comparator_name, comparison_name, group_n, target_days, comparator_days, target_outcomes, comparator_outcomes, hr, hr_lb, hr_ub, p)
+
+savedResults <- rbind(mainResults, esResults) |> 
+  arrange(outcome_name)
+
+
+savedResults |> 
+  select(
+    database_name, outcome_name, comparison_name, group_n, target_days, comparator_days, target_outcomes, comparator_outcomes, hr, hr_lb, hr_ub, p
+  ) |>
+  mutate(
+    hr = round(hr, 2),
+    hr_lb = round(hr_lb, 2),
+    hr_ub = round(hr_ub, 2),
+    p = round(p, 3)
+    
+  ) |> 
+  kable()
+
+
+# Save the results
+xlsx::write.xlsx(savedResults, "semanvamd-results-cm-sensitivity-analysis-2.xlsx")
+saveRDS(savedResults, "semanvamd-results-cm-sensitivity-analysis-2.rds")
+
+
+```
