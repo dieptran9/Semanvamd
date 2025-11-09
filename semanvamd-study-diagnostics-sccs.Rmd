@@ -1,0 +1,337 @@
+---
+title: "Semanvamd - SCSS - for Cindy et al."
+author: "Diep Tran"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(DT)
+library(DBI)
+library(glue)
+library(kableExtra)
+library(RPostgres)
+library(dplyr)
+library(purrr)
+library(stringr)
+library(tidyr)
+library(tibble)
+library(xlsx)
+
+if(!file.exists("semanvamd_env.R")) stop("semanvamd_env.R not found")
+
+source("semanvamd_env.R")
+
+# Create postgres connection
+con <- DBI::dbConnect(RPostgres::Postgres(), dbname = db_name, host = db_host, port = db_port, user = db_user, password = db_password,   options=paste0("-c search_path=", db_schema))
+
+# List tables in schema
+tables <- DBI::dbListTables(con, schema = db_schema)
+
+# Database meta data and c
+dbMeta <- DBI::dbGetQuery(con, "SELECT * FROM database_meta_data") |> 
+  filter(cdm_source_abbreviation == cdmSourceAbbrev)
+
+dbMeta|> kable()
+```
+
+## Databases Available
+
+```{r databases, echo=FALSE}
+databases <- DBI::dbGetQuery(con, "SELECT * FROM database_meta_data") |> 
+  select(cdm_source_name, cdm_source_abbreviation, cdm_holder, database_id) 
+
+databases |> kable()
+```
+
+## Database nicknames
+
+We will map long database names to short ones for publication. Please confirm these are right.
+
+```{r database_nicknames, echo=FALSE}
+
+dbMap <- list(
+  "CUIMC" = "CUIMC",
+  "JHME" = "JHME",
+  "Merative CCAE" = "CCAE",
+  "Merative MDCD" = "MDCD",
+  "Merative MDCR" = "MDCR",
+  "OHSU" = "OHSU",
+  "Optum EHR" = "Optum® EHR",
+  "OPTUM Extended SES" = "Clinformatics®",
+  "STARR" = "STARR",
+  "USC" = "USC",
+  "VA-OMOP" = "VA",
+  "WashU" = "WU"
+)
+
+# Make df. key = col 1, val = col 2. remove row names
+dbMapDf <- data.frame(
+  long = names(dbMap),
+  short = unlist(dbMap)
+)
+
+dbMapDf |> kable(row.names = FALSE)
+
+# Merge in short name
+databases <- databases |> 
+  left_join(dbMapDf, by = c("cdm_source_abbreviation" = "long")) |> 
+  rename(database_short_name = short)
+
+
+dbMapOrder <- list(
+  "CUIMC" = 3,
+  "JHME" = 4,
+  "Merative CCAE" = 1,
+  "Merative MDCD" = 5,
+  "Merative MDCR" = 6,
+  "OHSU" = 7,
+  "Optum EHR" = 8,
+  "OPTUM Extended SES" = 2,
+  "STARR" = 9,
+  "USC" = 10,
+  "VA-OMOP" = 11,
+  "WashU" = 12
+)
+
+dbOrderDf <- data.frame(
+  long = names(dbMapOrder),
+  order = unlist(dbMapOrder)
+)
+
+databases <- databases |> 
+  left_join(dbOrderDf, by = c("cdm_source_abbreviation" = "long")) |> 
+  arrange(order)
+
+
+```
+
+## Diagnostics Stats
+
+For each database, for both sensitive and specific PDR phenotypes, for each target/comparator pair, we need:
+
+-   MDRR (MDRR diagnostic)
+-   EASE (EASE diagnostic)
+-   Time trend (time trend diagnostic)
+-   Pre-exposure (pre-exposure diagnostic)
+
+These are stored in `sccs_diagnostic_summary`, so lets first pull all that data out. We'll then manipulate it into the results we need.
+
+Below is the first few rows of the diagnostics table.
+
+```{r diagnostics_data, echo=FALSE}
+
+allDiagnosticsSql <- "
+  SELECT * FROM sccs_diagnostics_summary;
+"
+
+allDiagnostics <- DBI::dbGetQuery(con, allDiagnosticsSql)
+
+allDiagnostics |> head() |> kable()
+
+```
+
+## Exposures
+
+We will need to filter down the diagnostics for the outcome-exposure pairs we care about.
+
+Note that SCCS uses different cohort IDs than the CDM. Here are the mappings:
+
+```{r tc-pairs, echo=FALSE}
+
+cohortIds <- c(
+ "Semaglutide" = 101,
+ "Dulaglutide" = 102,	
+ "Exenatide" = 103,
+ "Empagliflozin" = 104,
+ "Sitagliptin" = 105,
+ "Glipizide" = 106
+)
+
+exposures <- cohortIds |> 
+  enframe(name = "exposure", value = "cohort_id") |> 
+  mutate(exposure = as.character(exposure))
+ 
+exposures |> kable()
+
+```
+
+## Outcomes
+
+Outcome IDs remain the same.
+
+```{r outcomes, echo=FALSE}
+
+outcomeIds <- c(
+  "Specific NVAMD" = 1, 
+  "Sensitive NVAMD" = 2  
+)
+
+outcomes <- outcomeIds |> 
+  enframe(name = "outcome", value = "cohort_id") |> 
+  mutate(outcome = as.character(outcome))
+
+outcomes |> kable()
+
+```
+
+## Exposure Outcome Set ID vs. Outcome
+
+To get the diagnostics for an exposure-outcome pairing, you need to the `exposures_outcome_set_id`.
+
+First, get the `exposures_outcome_set_id` from the `sccs_exposures_outcome_set` table matching each outcome.
+
+Then, to figure out what exposure each `exposures_outcome_set_id` corresponds to, you need to match the `exposures_outcome_set_id` from the `sccs_exposures_outcome_set` table to the `exposures_outcome_set_id` in the `sccs_exposures` table, and match the `era_id` from the `sccs_exposures` table to the `cohort_id` for our exposure.
+
+```{r exposure_outcome_set, echo=FALSE}
+
+exposureSetSql <- "
+  SELECT * FROM sccs_exposures_outcome_set
+"
+
+allExposureSets <- DBI::dbGetQuery(con, exposureSetSql)
+
+exposureSets <- allExposureSets |> 
+  filter(outcome_id %in% outcomes$cohort_id) |>
+  inner_join(outcomes, by = c("outcome_id" = "cohort_id")) |>
+  select(outcome, outcome_id, exposures_outcome_set_id)
+
+exposureSets |> kable()
+
+
+```
+
+To get the exposure-outcome set ID for pairing, you need to match the `exposures_outcome_set_id` from the `sccs_exposures_outcome_set` table to the `exposures_outcome_set_id` in the `sccs_exposure` table.
+
+```{r exposure_sccs_outcome_set, echo=FALSE}
+
+sccsExposuresSql <- "
+  SELECT * FROM sccs_exposure
+"
+
+allScssExposures <- DBI::dbGetQuery(con, sccsExposuresSql)
+
+exposureOutcomePairs <- exposureSets |> 
+  inner_join(allScssExposures, by = c("exposures_outcome_set_id" = "exposures_outcome_set_id")) |> 
+  inner_join(exposures, by = c("era_id" = "cohort_id")) |>
+  select(outcome_id, outcome, era_id, exposure, exposures_outcome_set_id) |> 
+  arrange(outcome_id)
+
+exposureOutcomePairs |> kable()
+
+```
+
+## Diagnostis for each exposure/outcome pair
+
+With this information, we can now get the diagnostics for each exposure/outcome pair.
+
+```{r diagnostics, echo=FALSE}
+
+studyDiagnostics <- allDiagnostics |> 
+  filter(exposures_outcome_set_id %in% exposureOutcomePairs$exposures_outcome_set_id) |>
+  inner_join(databases |> select(database_id, database_short_name), by = c("database_id" = "database_id")) |> 
+  inner_join(exposureOutcomePairs |> select(exposures_outcome_set_id, outcome_id, outcome, exposure, era_id), by = c("exposures_outcome_set_id")) |> 
+  rename(exposure_id = era_id)
+
+
+```
+
+```{r diagnostics-helpers, echo=FALSE}
+getExposureDiagnostics <- function(exposureId, outcomeId) {
+  studyDiagnostics |> 
+    filter(
+      exposure_id == exposureId,
+      outcome_id == outcomeId
+    ) |> 
+   mutate(
+      mdrr_result = paste0(round(mdrr, 2), " (", stringr::str_to_lower(mdrr_diagnostic), ")"),
+      ease_result = paste0(round(ease, 2), " (", stringr::str_to_lower(ease_diagnostic), ")"),
+      time_trend_result = paste0(round(time_trend_p, 2), " (", stringr::str_to_lower(time_trend_diagnostic), ")"),
+      pre_exposure_result = paste0(round(pre_exposure_p, 2), " (", stringr::str_to_lower(pre_exposure_diagnostic), ")"),
+      all_pass = if_else(mdrr_diagnostic == "PASS" & ease_diagnostic == "PASS" & time_trend_diagnostic == "PASS" & (pre_exposure_diagnostic == "PASS" | pre_exposure_diagnostic == "NOT EVALUATED"), "Yes", "No")
+    ) |>
+    select(
+      exposure, database_short_name, mdrr_result, ease_result, time_trend_result, pre_exposure_result, all_pass, unblind
+    ) |> 
+    arrange(exposure, database_short_name)
+}
+
+
+aggregateResults <- function(outcomeId) {
+  results <- data.frame()
+  
+  for(i in 1:nrow(exposures)) {
+    exposureId <- exposures$cohort_id[i]
+    results <- bind_rows(results, getExposureDiagnostics(exposureId, outcomeId))
+  }
+  
+  results
+}
+
+processForSaving <- function(df) {
+  df |> 
+    select(exposure, database_short_name, mdrr_result, ease_result, time_trend_result, pre_exposure_result, all_pass) |> 
+    mutate(
+      exposure = if_else(duplicated(exposure), "", exposure)
+    )
+}
+
+outcomeIds <- c(
+  1, # Specific NVAMD
+  2  # Sensitive NVAMD	
+)
+```
+
+## Specific NVAMD
+
+```{r sensitive_pdr, echo=FALSE}
+
+results <- aggregateResults(1)
+results |> DT::datatable(options = list(pageLength = 20))
+
+totalPass <- results |> filter(all_pass == "Yes") |> nrow()
+totalFail <- results |> filter(all_pass == "No") |> nrow()
+total <- nrow(results)
+
+summary <- data.frame(
+  total = total,
+  total_pass = totalPass,
+  total_fail = totalFail,
+  pass_rate = round(totalPass / total, 2)
+)
+
+summary |> kable(row.names = FALSE)
+
+xlsx::write.xlsx(processForSaving(results), "semanvamd-study-diagnostics_sccs_SpecificNVAMD.xlsx")
+
+```
+
+## Sensitive NVAMD
+
+```{r specific_pdr, echo=FALSE}
+
+
+results <- aggregateResults(2)
+results |> DT::datatable(options = list(pageLength = 20))
+
+totalPass <- results |> filter(all_pass == "Yes") |> nrow()
+totalFail <- results |> filter(all_pass == "No") |> nrow()
+total <- nrow(results)
+
+summary <- data.frame(
+  total = total,
+  total_pass = totalPass,
+  total_fail = totalFail,
+  pass_rate = round(totalPass / total, 2)
+)
+
+summary |> kable(row.names = FALSE)
+
+xlsx::write.xlsx(processForSaving(results), "semanvamd-study-diagnostics_sccs_SensitiveNVAMD.xlsx")
+
+
+```
