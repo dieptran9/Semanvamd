@@ -26,6 +26,8 @@ if(!file.exists("semanvamd_env.R")) stop("semanvamd_env.R not found")
 
 source("semanvamd_env.R")
 
+cacheAllBaselineChars <- TRUE
+
 # Create postgres connection
 con <- DBI::dbConnect(RPostgres::Postgres(), dbname = db_name, host = db_host, port = db_port, user = db_user, password = db_password,   options=paste0("-c search_path=", db_schema))
 
@@ -123,12 +125,12 @@ Outcomes:
 
 For 1st the sensitivity analysis, we will compare the following treatments and comparators.
 
--   `301`: New user of semaglutide with prior T2DM vs.
+-   `301`: New user of semaglutide with prior T2DMndef
+
 -   `313`: New user of empagliflozin with prior T2DM
 
---
-
 -   `301`: New user of semaglutide with prior T2DM vs.\
+
 -   `314`: New user of sitagliptin with prior T2DM
 
 --
@@ -155,23 +157,44 @@ outcomeIds <- c(
   2  # Sensitive NVAMD
 )
 
+#Update this part <- DN: Ctrl + Shift + C for turn on/off multiple comment lines
+
 cohortIds <- c(
-  "New user of semaglutide with prior T2DM and prior metformin and no insulin" = 301,
-  "New user of empagliflozin with prior T2DM and prior metformin and no insulin" = 313,
-  "New user of sitagliptin with prior T2DM and prior metformin and no insulin" = 314,
-  "New user of glipizide with prior T2DM and prior metformin and no insulin" = 315,
-  "New user of dulaglutide with prior T2DM and prior metformin and no insulin" = 311,
-  "New user of exenatide with prior T2DM and prior metformin and no insulin" = 312
+  "New user of semaglutide with prior T2DM and prior metformin and no insulin" = 201,
+  "New user of empagliflozin with prior T2DM and prior metformin and no insulin" = 211,
+  "New user of sitagliptin with prior T2DM and prior metformin and no insulin" = 212,
+  "New user of glipizide with prior T2DM and prior metformin and no insulin" = 213,
+  "New user of dulaglutide with prior T2DM and prior metformin and no insulin" = 214,
+  "New user of exenatide with prior T2DM and prior metformin and no insulin" = 215
 )
 
 cohortIds_DT <- c(
-  301,
-  313,
-  314,
-  315,
-  311,
-  312
+  201,
+  211,
+  212,
+  213,
+  214,
+  215
 )
+ 
+# cohortIds <- c(
+#   "New user of semaglutide with prior T2DM" = 301,
+#   "New user of dulaglutide with prior T2DM" = 311,
+#   "New user of exenatide with prior T2DM" = 312,
+#   "New user of empagliflozin with prior T2DM" = 313,
+#   "New user of sitagliptin with prior T2DM" = 314,
+#   "New user of glipizide with prior T2DM" = 315
+# )
+# 
+# cohortIds_DT <- c(
+#   301,
+#   311,
+#   312,
+#   313,
+#   314,
+#   315
+# )
+
 
 
 cohortCombinations <- readr::read_csv("https://raw.githubusercontent.com/ohdsi-studies/SemaglutideNvamd/main/inst/cmTcList.csv") |> 
@@ -525,8 +548,9 @@ savedResults |>
 
 
 # Save the results
-xlsx::write.xlsx(savedResults, "semanvamd-results-cm-sensitivity-analysis-1.xlsx")
-saveRDS(savedResults, "semanvamd-results-cm-sensitivity-analysis-1.rds")
+xlsx::write.xlsx(savedResults, "semanvamd-results-cm-sensitivity-analysis-1-series2.xlsx")
+# xlsx::write.xlsx(savedResults, "semanvamd-results-cm-sensitivity-analysis-1-series3.xlsx")
+#saveRDS(savedResults, "semanvamd-results-cm-sensitivity-analysis-1.rds")
 
 
 ```
