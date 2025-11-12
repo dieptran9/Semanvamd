@@ -1,5 +1,5 @@
 ---
-title: "Semanvamd - CM - for Cindy et al."
+title: "Semanvamd Study diagnostics - CM - for Cindy et al."
 author: "Diep Tran"
 date: "`r Sys.Date()`"
 output: html_document
