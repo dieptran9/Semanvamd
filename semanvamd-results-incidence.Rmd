@@ -1,0 +1,736 @@
+---
+title: "Semaglutide NVAMD Results for Cindy et al."
+author: "Diep Tran"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(DT)
+library(DBI)
+library(glue)
+library(kableExtra)
+library(RPostgres)
+library(dplyr)
+library(purrr)
+library(stringr)
+library(tidyr)
+library(xlsx)
+
+if(!file.exists("semanvamd_env.R")) stop("semanvamd_env.R not found")
+
+source("semanvamd_env.R")
+
+cacheAllBaselineChars <- TRUE
+
+# Notes on table prefixes:
+# https://ohdsi.github.io/ShinyAppBuilder/
+# cd_ = DefaultCohortDiagnostics table prefix
+# cg = Cohort Table Prefix
+# c = Default Characterization Prefix 
+# plp = Patient Level Prediction
+# cm = Cohort Method prefix
+# 
+
+# Create postgres connection
+con <- DBI::dbConnect(RPostgres::Postgres(), dbname = db_name, host = db_host, port = db_port, user = db_user, password = db_password,   options=paste0("-c search_path=", db_schema))
+
+# List tables in schema
+tables <- DBI::dbListTables(con, schema = db_schema)
+
+# Database meta data and c
+dbMeta <- DBI::dbGetQuery(con, "SELECT * FROM database_meta_data") |> 
+  filter(cdm_source_abbreviation == cdmSourceAbbrev)
+
+databaseId <- dbMeta$database_id
+databaseId
+```
+
+## Databases Available
+
+```{r databases, echo=FALSE}
+databases <- DBI::dbGetQuery(con, "SELECT * FROM database_meta_data") |> 
+  select(cdm_source_name, cdm_source_abbreviation, cdm_holder, database_id) 
+
+databases |> kable()
+```
+
+
+## Database nicknames
+
+We will map long database names to short ones for publication. Please confirm these are right.
+
+```{r database_nicknames, echo=FALSE}
+
+dbMap <- list(
+  "CUIMC" = "CUIMC",
+  "JHME" = "JHME",
+  "Merative CCAE" = "CCAE",
+  "Merative MDCD" = "MDCD",
+  "Merative MDCR" = "MDCR",
+  "OHSU" = "OHSU",
+  "Optum EHR" = "Optum® EHR",
+  "OPTUM Extended SES" = "Clinformatics®",
+  "STARR" = "STARR",
+  "USC" = "USC",
+  "VA-OMOP" = "VA",
+  "WashU" = "WU"
+)
+
+# Make df. key = col 1, val = col 2. remove row names
+dbMapDf <- data.frame(
+  long = names(dbMap),
+  short = unlist(dbMap)
+)
+
+dbMapDf |> kable(row.names = FALSE)
+
+# Merge in short name
+databases <- databases |> 
+  left_join(dbMapDf, by = c("cdm_source_abbreviation" = "long")) |> 
+  rename(database_short_name = short)
+
+
+dbMapOrder <- list(
+  "CUIMC" = 3,
+  "JHME" = 4,
+  "Merative CCAE" = 1,
+  "Merative MDCD" = 5,
+  "Merative MDCR" = 6,
+  "OHSU" = 7,
+  "Optum EHR" = 8,
+  "OPTUM Extended SES" = 2,
+  "STARR" = 9,
+  "USC" = 10,
+  "VA-OMOP" = 11,
+  "WashU" = 12
+)
+
+dbOrderDf <- data.frame(
+  long = names(dbMapOrder),
+  order = unlist(dbMapOrder)
+)
+
+databases <- databases |> 
+  left_join(dbOrderDf, by = c("cdm_source_abbreviation" = "long")) |> 
+  arrange(order)
+
+```
+
+## All Cohort Definitions in the Database
+
+```{r cohort_definition_info, echo=FALSE}
+allCohortDefinitions <- DBI::dbGetQuery(con, "SELECT * FROM cg_cohort_definition") |> 
+  select(cohort_definition_id, cohort_name) 
+
+ allCohortDefinitions |> kable()
+```
+
+# All Cohorts Available in The Incidence Summary
+
+The below cohorts are available in the incidence summary table.
+
+In the semanvamd, the target_name, out_come are not available in the ci_incidence_summary table BUT available in other tables
+
+```{r cohorts_in_incidence_summary, echo=FALSE}
+
+cohortsInIncidenceSummary <- DBI::dbGetQuery(con, "
+  SELECT DISTINCT
+    cs.target_cohort_definition_id as cohort_definition_id,
+    ct.target_name
+  FROM semanvamd.ci_incidence_summary cs
+  INNER JOIN semanvamd.ci_outcome_def cf
+    ON cf.outcome_id = cs.outcome_id
+  INNER JOIN semanvamd.ci_target_def ct
+    ON ct.target_cohort_definition_id = cs.target_cohort_definition_id") |> 
+  arrange(cohort_definition_id)
+
+cohortsInIncidenceSummary |> kable()
+```
+
+We are going to select:
+
+-   Prior T2DM
+-   Prior metformin
+-   Drug exposure:
+    -   Semaglutide (GLP-1 RA)
+    -   Dulaglutide (GLP-1 RA)
+    -   Exenatide (GLP-1 RA)
+    -   Empagliflozin (SGLT2 inhibitor)
+    -   Sitagliptin (DPP4 inhibitor)
+    -   Glipizide (sulfonylurea)
+-   Drug used as 2nd-line treatment
+
+We will also add in the Indication cohort
+
+These can be changed.
+
+Note that in comparison to the characterization data, these are the base cohort Ids with no time restrictions.
+
+```{r cohorts_chosen, echo=FALSE}
+cohortIds <- c(
+  50, # Indication
+  201, # Semaglutide
+  211, # Dulaglutide
+  212, # Exenatide
+  213, # Empagliflozin
+  214, # Sitagliptin
+  215  # Glipizide
+)
+
+restrictedCohortDefs <- cohortsInIncidenceSummary |>
+  filter(cohort_definition_id %in% cohortIds)
+
+restrictedCohortDefs |> kable()
+```
+
+# Outcomes
+
+The below outcomes are available in the incidence summary table:
+
+```{r outcomes, echo=FALSE}
+outcomesInIncidenceSummary <- DBI::dbGetQuery(con, "SELECT DISTINCT
+    cf.outcome_cohort_definition_id as cohort_definition_id,
+    cf.outcome_name
+FROM semanvamd.ci_incidence_summary cs
+INNER JOIN semanvamd.ci_outcome_def cf
+    ON cf.outcome_id = cs.outcome_id
+INNER JOIN semanvamd.ci_target_def ct
+    ON ct.target_cohort_definition_id = cs.target_cohort_definition_id") |> 
+  arrange(cohort_definition_id)
+
+outcomesInIncidenceSummary |> kable()
+```
+
+We will be extracting incidence data for two outcomes:
+
+-   "TDRMEV" PDR phenotype: Nonarteric anterior ischemic neuropathy with index date correction and 2nd dx and 2dxGCA (17788)
+-   "PDR" PDR phenotype: Nonarteric anterior ischemic neuropathy with index date correction and 2dxGCA (17706)
+
+```{r outcomes_chosen, echo=FALSE}
+outcomeIds <- c(
+  1, # Specific NVAMD
+  2  # Sensitive NVAMD
+)
+
+restrictedOutcomeDefs <- outcomesInIncidenceSummary |>
+  filter(cohort_definition_id %in% outcomeIds)
+
+restrictedOutcomeDefs |> kable()
+```
+
+# Incidence rates
+
+We start by filtering the incidence summary for the selected target outcomes and exposure cohorts. Below is an example of the incidence summary table.
+
+```{r select-all-incidence-rates, echo=FALSE}
+
+# Easy outcome mapping
+outcomeShortNames <- c(
+  "1" = "Specific NVAMD",
+  "2" = "Sensitive NVAMD"
+)
+
+pdrId <- 1
+tdrmevId <- 2
+
+# cohortShortNames <- c(
+#   "50" = "Indication Cohort",
+#   "201" = "Semaglutide",
+#   "211" = "Dulaglutide",
+#   "212" = "Exenatide",
+#   "213" = "Empagliflozin",
+#   "214" = "Sitagliptin",
+#   "215" = "Glipizide"
+# )
+
+cohortShortNames <- c(
+  '50' =	'Persons with Type 2 DM and no prior T1DM or secondary Diabetes',
+  '201'=	'New user of semaglutide as 2nd line prior T2DM and metformin',
+  '211'=	'New user of dulaglutide as 2nd line prior T2DM and metformin',
+  '212'=	'New user of exenatide as 2nd line prior T2DM and metformin',
+  '213'=	'New user of empagliflozin as 2nd line prior T2DM and metformin',
+  '214'=	'New user of sitagliptin as 2nd line prior T2DM and metformin',
+  '215'=	'New user of glipizide as 2nd line prior T2DM and metformin'
+)
+# transform outcomeIds into comma separated list
+outcomeIdsString <- paste(outcomeIds, collapse = ", ")
+cohortIdsString <- paste(cohortIds, collapse = ", ")
+allIncidenceSql <- glue("
+                        SELECT 
+                            cs.ref_id,
+                            cs.database_id,
+                            cs.source_name,
+                            cs.target_cohort_definition_id,
+                            cs.tar_id,
+                            cs.subgroup_id,
+                            cs.outcome_id,
+                            cs.gender_id,
+                            cs.gender_name,
+                            cs.start_year,
+                            cs.persons_at_risk_pe,
+                            cs.persons_at_risk,
+                            cs.person_days_pe,
+                            cs.person_days,
+                            cs.person_outcomes_pe,
+                            cs.person_outcomes,
+                            cs.outcomes_pe,
+                            cs.outcomes,
+                            cs.incidence_proportion_p100p,
+                            cs.incidence_rate_p100py,
+                            ct.target_name,
+                            ci.tar_start_with,
+                            ci.tar_start_offset,
+                            ci.tar_end_with,
+                            ci.tar_end_offset,                         
+                            cj.subgroup_name,
+                            cf.outcome_cohort_definition_id,
+                            cf.outcome_name,
+                            cf.clean_window,
+                            cs.age_group_id as age_id,
+                            cg.age_group_name
+                        FROM semanvamd.ci_incidence_summary cs
+                        LEFT JOIN semanvamd.ci_outcome_def cf
+                            ON cf.outcome_id = cs.outcome_id
+                        LEFT JOIN semanvamd.ci_target_def ct
+                            ON ct.target_cohort_definition_id = cs.target_cohort_definition_id
+                        LEFT JOIN semanvamd.ci_age_group_def cg 
+                            ON cg.age_group_id = cs.age_group_id
+                        LEFT JOIN semanvamd.ci_tar_def ci 
+                            ON ci.tar_id = cs.tar_id
+                        LEFT JOIN semanvamd.ci_subgroup_def cj 
+                            ON cj.subgroup_id = cs.subgroup_id
+                        WHERE cs.outcome_id IN ({outcomeIdsString})
+                            AND cs.target_cohort_definition_id IN ({cohortIdsString})
+                    ")
+
+allIncidenceRates <- DBI::dbGetQuery(con, allIncidenceSql)
+
+simplifyIncidenceRateResults <- function(df) {
+  df |>
+    select(
+      database_id,
+      target_cohort_definition_id,
+      target_name,
+      outcome_cohort_definition_id,
+      outcome_name,
+      age_group_name,
+      gender_name,
+      start_year,
+      persons_at_risk,
+      person_days,
+      outcomes,
+      person_outcomes,
+      incidence_proportion_p100p,
+      incidence_rate_p100py
+    ) |>
+    mutate(
+      target_name = target_cohort_definition_id |> as.character() |> map_chr( ~cohortShortNames[.x]),
+      outcome_name = outcome_cohort_definition_id |> as.character() |> map_chr( ~outcomeShortNames[.x]),
+      persons_at_risk = persons_at_risk,
+      person_days = person_days,
+      outcomes = outcomes,
+      person_outcomes = person_outcomes,
+      incidence_proportion_p100000p = round(incidence_proportion_p100p * 1000, 2),
+      incidence_rate_p100000py = round(incidence_rate_p100py * 100, 2)
+    ) |>
+    inner_join(databases |> select(database_id, cdm_source_abbreviation), by = "database_id") |>
+    rename(
+      database = cdm_source_abbreviation,
+      target = target_name,
+      outcome = outcome_name,
+      target_id = target_cohort_definition_id,
+      outcome_id = outcome_cohort_definition_id
+    ) |> 
+    select(
+      database, 
+      target,
+      outcome, 
+      age_group_name,
+      gender_name,
+      start_year,
+      persons_at_risk,
+      person_days,
+      outcomes, 
+      person_outcomes,
+      incidence_proportion_p100000p,
+      incidence_rate_p100000py
+    ) |> 
+    arrange(target, outcome, database)
+}
+
+allIncidenceRateSummary <- allIncidenceRates |> simplifyIncidenceRateResults()
+
+allIncidenceRateSummary |> 
+  head() |> 
+  kable()
+
+# xlsx::write.xlsx(allIncidenceRates, "NVAMD-allIncidenceRates.xlsx")
+write.csv(allIncidenceRates, "NVAMD-allIncidenceRates.csv", row.names = FALSE)
+
+```
+
+## Filtering by age, gender, start year == NA
+
+To get the date for the specific cohorts, we can filter the above table for where age, gender, and start_year == `NA`.
+
+Note, to get the proportion/rate per 100,000, I multiplied the per 100 person values in the results database by 1000: 100\*1000 = 100,000.
+
+Here's a sampling of what you get:
+
+```{r specific-incidence-rates, echo=FALSE}
+# write.csv(allIncidenceRates, "NVAMD_allIncidenceRates_DT.csv", row.names = FALSE)
+
+getUnconditionalIncidenceRates <- function(data) {
+  data |>
+  filter(
+    is.na(age_id),
+    is.na(gender_id),
+    is.na(start_year)
+  )
+}
+
+specificIncidenceRates <- allIncidenceRates |>
+  getUnconditionalIncidenceRates()
+  
+specificIncidenceRates |> 
+  simplifyIncidenceRateResults() |>
+  select(-age_group_name, -gender_name, -start_year) |>
+  head(20) |>
+  kable()
+```
+
+## Reshaping everything
+
+We now want a 10-column table with these columns in this order, corresponding to these data:
+
+-   Exposure
+-   Database
+-   Patients at Risk: taken from persons_at_risk_pe, which is the number of patients at risk in the exposure cohort BEFORE removing excluded time from TAR)
+-   On-Treatment Time (Person-Years): taken from person_days_pe, divided by 365.25, which is the number of days at risk in the exposure cohort before removing excluded time from TAR)
+
+Then, for each outcome (PDR/TDRMEV):
+
+-   Number of Outcomes
+-   Incidence Proportion (per 100,000 Persons)
+-   Incidence Rate (per 100,000 Person-Years)
+
+Note that the table example provided has a single column for patient at risk and on-treatment time. These values only correspond when using the time before removing excluded time from TAR. See schema definitions here: <https://github.com/OHDSI/CohortIncidence/blob/ac147182ced2461d515041b385962062309c473f/R/CohortIncidence.R>
+
+Please confirm this is what we want.
+
+Please also note that after filtering for data, there are sometimes duplicates in the database. I de-duplicate that matching records and proceed if after de-duping, there are the correct number of records. There is a stop error to ensure
+
+Note that NAs were recoded to "0" to make sorting smarter.
+
+```{r reshape-incidence-rates-setup, echo=FALSE}
+
+baseTable <- tribble(
+  ~exposure, ~database, ~patients_at_risk_pe, ~patients_at_risk_pdr, ~on_treatment_time_years_pdr, ~outcomes_pdr, ~incidence_p100000p_pdr, ~incidence_p100000py_pdr, ~patients_at_risk_tdrmev, ~on_treatment_time_years_tdrmev, ~outcomes_tdrmev, ~incidence_p100000p_tdrmev, ~incidence_p100000py_tdrmev
+)
+
+getDataPerDatabase <- function(data, databaseId) {
+  data |>
+    filter(database_id == databaseId)
+}
+
+getDataPerExposure <- function(data, exposureId) {
+  data |>
+    filter(target_cohort_definition_id == exposureId)
+}
+
+getDataPerOutcome <- function(data, outcomeId) {
+  data |>
+    filter(outcome_cohort_definition_id == outcomeId)
+}
+
+prettyNumber <- function(x, roundTo = 0) {
+  prettyNum(round(as.numeric(x), roundTo), big.mark = "", scientific = FALSE)
+}
+```
+
+### Duplicate Data for Indication Cohort in Outcome Data
+
+There are some databases that have duplicate for the indication cohort when grabbing outcome data for the specific/sensitive outcomes.. Lets summarize those below to see if we can identify the issue.
+
+```{r duplicate-database-ids, echo=FALSE}
+exposureId <- 50
+
+d <- allIncidenceRates |>
+  getUnconditionalIncidenceRates() |>
+  getDataPerExposure(exposureId) |> 
+  arrange(database_id)
+
+# Get database IDs
+databaseIds <- unique(d$database_id)
+
+# Create a tribble to store the duplicate database IDs
+indicationIdDuplicatesData <- tribble(~database_id, ~database_name, ~has_duplicate_indication_rows, ~record_sets)
+dupeRows <- data.frame()
+
+# For each database, collect relevant data into tribble
+
+databaseIds |> 
+  walk(\(databaseId) {
+    dbRow <- baseTable |> add_row()
+      
+  dbName <- databases |> 
+    filter(database_id == databaseId) |>
+    pull(cdm_source_abbreviation)
+  
+  rowData <- d |>
+    getDataPerDatabase(databaseId) |> 
+    unique()
+  
+  if (nrow(rowData) >2) {
+    # print(paste0("More than 2 rows of outcome data for exposureId ", exposureId, " and databaseId ", databaseId, " (", dbName , ") when there should only be data for the sensitive and specific outcomes."))
+    # 
+    # print("Example data:")
+    indicationIdDuplicatesData <<- indicationIdDuplicatesData |> add_row(database_id = databaseId, database_name = dbName, has_duplicate_indication_rows = TRUE, record_sets = nrow(rowData)/2)
+    dupeRows <<- rbind(dupeRows, rowData)
+  } else {
+    indicationIdDuplicatesData <<- indicationIdDuplicatesData |> add_row(database_id = databaseId, database_name = dbName, has_duplicate_indication_rows = FALSE, record_sets = 1)
+  }
+
+  
+})
+
+indicationIdDuplicatesData |> kable()
+
+```
+
+## Duplicate Rows
+
+```{r duplicate-rows, echo=FALSE}
+dupeRows |> 
+  head(10) |>
+  kable()
+```
+
+## Selecting from duplicates
+
+In each case, there is a clear "correct" set of results, indentifiable by:
+
+-   Duplicate data is identical
+
+Or
+
+-   Ns reflecting database size. Filter: `persons_at_risk_pe` \> 20
+-   Incidence proportion/rates not NA
+
+⛔️⚠️ **I believe it is still important to check to make sure everything with the run is correct.** ⛔️⚠
+
+### Reshaped Data
+
+The below incidence data applies above rules to handle duplciates.
+
+```{r reshape-incidence-rates, echo=FALSE}
+
+getIncidenceSummaryPerExposure <- function(data, exposureId) {
+  # Filter the data per this exposure ID
+  d <- data |>
+    getUnconditionalIncidenceRates() |>
+    getDataPerExposure(exposureId) |>
+    arrange(database_id)
+  # DT_chk_data <<- d
+  
+  # Get database IDs
+  databaseIds <- unique(d$database_id)
+  #DT_chk_databaseIds <<- databaseIds
+  
+  # For each database, collect relevant data into tribble
+  cohortData <- databaseIds |>
+    map_dfr(\(databaseId) {
+      # print(databaseId)
+      dbRow <- baseTable |> add_row()
+      
+      dbName <- databases |>
+        filter(database_id == databaseId) |>
+        pull(cdm_source_abbreviation)
+
+      rowData <- d |>
+        getDataPerDatabase(databaseId) |>
+        unique()
+      
+      # If there are more than 2 rows after duping, filter out this that have persons < 20 OR NA incidence rates
+      if(nrow(rowData) > 2) {
+         rowData <- rowData |>
+            filter(
+              persons_at_risk_pe >= 20,
+              !is.na(incidence_rate_p100py),
+              !is.na(incidence_proportion_p100p)
+            ) 
+         
+      }
+      
+      if (nrow(rowData) <= 2) {
+
+        dbRow$exposure <- cohortShortNames[as.character(exposureId)]
+  
+        dbRow$database <- databases |>
+          filter(database_id == databaseId) |>
+          pull(cdm_source_abbreviation)
+  
+         # Rename to short version of db name using dMapDf
+        dbRow$database <- dbMapDf |>
+          filter(long == dbRow$database) |>
+          pull(short)
+  
+        dbRow$patients_at_risk_pe <-  rowData$persons_at_risk_pe |> first()
+  
+        # Proliferative diabetic retinopathy outcome
+        rowDataPDR <- rowData |> getDataPerOutcome(pdrId)
+        dbRow$patients_at_risk_pdr <- rowDataPDR$persons_at_risk
+        dbRow$on_treatment_time_years_pdr <- rowDataPDR$person_days |> first() / 365.25
+        dbRow$outcomes_pdr <- rowDataPDR$outcomes
+        dbRow$incidence_p100000p_pdr <- rowDataPDR$incidence_proportion_p100p * 1000
+        dbRow$incidence_p100000py_pdr <- rowDataPDR$incidence_rate_p100py * 1000
+  
+        # Treatment-requiring Diabetic Retinopathy or Macular Edema including vitrectomy outcome
+        rowDataTDRMEV <- rowData |> getDataPerOutcome(tdrmevId)
+        dbRow$patients_at_risk_tdrmev <- rowDataTDRMEV$persons_at_risk
+        dbRow$on_treatment_time_years_tdrmev <- rowDataTDRMEV$person_days |> first() / 365.25
+        dbRow$outcomes_tdrmev <- rowDataTDRMEV$outcomes
+        dbRow$incidence_p100000p_tdrmev <- rowDataTDRMEV$incidence_proportion_p100p * 1000
+        dbRow$incidence_p100000py_tdrmev <- rowDataTDRMEV$incidence_rate_p100py * 1000
+  
+        # Recode NAs to 0
+        dbRow <- dbRow |> mutate(across(where(is.character), ~if_else(.x == "NA", "0", .x)))
+        
+        dbRow
+      } else {
+        NULL
+        # stop("More than 2 rows of outcome data for exposureId ", exposureId, " and databaseId ", databaseId, " when there should only be data for pdr/tdrmev.")
+      }
+    })
+  # DT_chk_cohortdata <<- cohortData
+  # DT_chk_databases <<- databases
+  # print('DT: Check point')
+
+  # Arrange by db order
+  cohortData |> 
+          inner_join(databases |> select(database_short_name, order), by = c("database" = "database_short_name")) |>
+          arrange(order) |>
+          select(-order)
+}
+
+results <- cohortIds |>
+  map_dfr(\(exposureId) {
+    getIncidenceSummaryPerExposure(allIncidenceRates, exposureId)
+  })
+
+presentationResults <- results |>
+  rename(
+    "Exposure" = "exposure",
+    "Database" = "database",
+    "Patients at Risk (PE)" = "patients_at_risk_pe",
+    "Patients at Risk (PDR)" = "patients_at_risk_pdr",
+    "Number of Outcomes (PDR)" = "outcomes_pdr",
+    "On-Treatment Time (Person-Years) (PDR)" = "on_treatment_time_years_pdr",
+    "Incidence Proportion (per 100,000 Persons) (PDR)" = "incidence_p100000p_pdr",
+    "Incidence Rate (per 100,000 Person-Years) (PDR)" = "incidence_p100000py_pdr",
+    "Patients at Risk (TDRMEV)" = "patients_at_risk_tdrmev",
+    "Number of Outcomes (TDRMEV)" = "outcomes_tdrmev",
+    "On-Treatment Time (Person-Years) (TDRMEV)" = "on_treatment_time_years_tdrmev",
+    "Incidence Proportion (per 100,000 Persons) (TDRMEV)" = "incidence_p100000p_tdrmev",
+    "Incidence Rate (per 100,000 Person-Years) (TDRMEV)" = "incidence_p100000py_tdrmev"
+  )
+
+datatable(presentationResults |> mutate(across(where(is.numeric), function(x) {prettyNumber(x, 1)})), options = list(pageLength = 100))
+
+```
+
+## Paste-friendly Results
+
+Results exported to `results-incidence.xlsx`
+
+```{r google-docs-paste, echo=FALSE}
+finalResults <- results |>
+  select(
+    exposure,
+    database,
+    patients_at_risk_pdr,
+    on_treatment_time_years_pdr,
+    outcomes_pdr,
+    incidence_p100000p_pdr,
+    incidence_p100000py_pdr,
+    patients_at_risk_tdrmev,
+    on_treatment_time_years_tdrmev,
+    outcomes_tdrmev,
+    incidence_p100000p_tdrmev,
+    incidence_p100000py_tdrmev
+  ) # |>
+  # mutate(across(where(is.numeric), prettyNumber))
+
+presentationResults <- finalResults |>
+  rename(
+    "Exposure" = "exposure",
+    "Database" = "database",
+    "Patients at Risk (Specific NVAMD)" = "patients_at_risk_pdr",
+    "Number of Outcomes (Specific NVAMD)" = "outcomes_pdr",
+    "On-Treatment Time (Person-Years) (Specific NVAMD)" = "on_treatment_time_years_pdr",
+    "Incidence Proportion (per 100,000 Persons) (Specific NVAMD)" = "incidence_p100000p_pdr",
+    "Incidence Rate (per 100,000 Person-Years) (Specific NVAMD)" = "incidence_p100000py_pdr",
+    "Patients at Risk (Sensitive NVAMD)" = "patients_at_risk_tdrmev",
+    "Number of Outcomes (Sensitive NVAMD)" = "outcomes_tdrmev",
+    "On-Treatment Time (Person-Years) (Sensitive NVAMD)" = "on_treatment_time_years_tdrmev",
+    "Incidence Proportion (per 100,000 Persons) (Sensitive NVAMD)" = "incidence_p100000p_tdrmev",
+    "Incidence Rate (per 100,000 Person-Years) (Sensitive NVAMD)" = "incidence_p100000py_tdrmev"
+  )
+
+presentationResults |>
+  mutate(across(where(is.numeric), function(x) {prettyNumber(x, 1)})) |>
+  kable()
+
+#xlsx::write.xlsx(presentationResults |> mutate(across(where(is.numeric), function(x) {prettyNumber(x, 1)})), "NVAMD-results-incidence.xlsx")
+
+# finalResults |>
+# mutate(across(where(is.numeric), function(x) {prettyNumber(x, 1)})) |>
+# kable()
+
+# xlsx::write.xlsx(finalResults |> mutate(across(where(is.numeric), function(x) {prettyNumber(x, 1)})), "NVAMD-results-incidence.xlsx")
+
+```
+
+## Per exposure, aggregation accross databases
+
+Notes:
+
+-   patients at risk is summed
+-   on treatment time is summed
+-   outcomes is summed
+
+Aggregated results exported to `results-incidence-aggregated-by-exposure.xlsx`
+
+```{r per-exposure-patient-outcome, echo=FALSE}
+aggregatedByDB <- finalResults |> 
+  group_by(exposure) |> 
+  mutate( # if outcomes or patients = -5 take abs
+    outcomes_pdr = if_else(outcomes_pdr == -5, abs(outcomes_pdr), outcomes_pdr),
+    patients_at_risk_pdr = if_else(patients_at_risk_pdr == -5, abs(patients_at_risk_pdr), patients_at_risk_pdr),
+    outcomes_tdrmev = if_else(outcomes_tdrmev == -5, abs(outcomes_tdrmev), outcomes_tdrmev),
+    patients_at_risk_tdrmev = if_else(patients_at_risk_tdrmev == -5, abs(patients_at_risk_tdrmev), patients_at_risk_tdrmev),
+  ) |>
+  summarise(
+    patients_at_risk_pdr = sum(patients_at_risk_pdr),
+    on_treatment_time_years_pdr = sum(on_treatment_time_years_pdr),
+    outcomes_pdr = sum(outcomes_pdr),
+    incidence_p100000p_pdr = mean(incidence_p100000p_pdr, na.rm = TRUE),
+    incidence_p100000py_pdr = mean(incidence_p100000py_pdr, na.rm = TRUE),
+    patients_at_risk_tdrmev = sum(patients_at_risk_tdrmev),
+    on_treatment_time_years_tdrmev = sum(on_treatment_time_years_tdrmev),
+    outcomes_tdrmev = sum(outcomes_tdrmev),
+    incidence_p100000p_tdrmev = mean(incidence_p100000p_tdrmev, na.rm = TRUE),
+    incidence_p100000py_tdrmev = mean(incidence_p100000py_tdrmev, na.rm = TRUE),
+  ) |>
+  mutate(across(where(is.numeric), function(x) {prettyNumber(x, 1)}))
+
+aggregatedByDB |> kable()
+
+xlsx::write.xlsx(aggregatedByDB, "NVAMD-results-incidence-aggregated-by-exposure.xlsx")
+
+```
