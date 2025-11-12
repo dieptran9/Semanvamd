@@ -150,10 +150,10 @@ outcomeIds <- c(
 
 cohortIds <- c(
     "Semaglutide 2nd-line tx w/ prior T2DM Dec2017-Jan2020" = 401,
-    "Empagliflozin 2nd-line tx w/ prior T2DM Dec2017-Jan2020" = 411,
     "Semaglutide 2nd-line tx w/ prior T2DM Feb2020-Jun2021" = 402,
-    "Empagliflozin 2nd-line tx w/ prior T2DM Feb2020-Jun2021" = 412,
     "Semaglutide 2nd-line tx w/ prior T2DM Jul2021-Dec2024" = 403,
+    "Empagliflozin 2nd-line tx w/ prior T2DM Dec2017-Jan2020" = 411,
+    "Empagliflozin 2nd-line tx w/ prior T2DM Feb2020-Jun2021" = 412,
     "Empagliflozin 2nd-line tx w/ prior T2DM Jul2021-Dec2024" = 413
 )
 
@@ -179,6 +179,10 @@ The following diagnostics exist for every T/C pair by outcome and datbaase:
 -   EASE
 
 These are stored in `cm_diagnostic_summary`. We will visualize only those that pass all diagnostics. To determine whether all pass, we rely upon the `unblind` flag.
+
+DT check on sql:
+
+SELECT \* FROM semanvamd.cm_diagnostics_summary WHERE balance_diagnostic = 'PASS' AND shared_balance_diagnostic = 'PASS' AND equipoise_diagnostic = 'PASS' AND mdrr_diagnostic = 'PASS' AND ease_diagnostic = 'PASS' AND outcome_id IN (1, 2) AND ( (target_id = 401 AND comparator_id = 411) OR (target_id = 402 AND comparator_id = 412) OR (target_id = 403 AND comparator_id = 413) );
 
 ```{r diagnostics_data, echo=FALSE}
 
